@@ -15,6 +15,8 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { fetchCompetencias } from "@/lib/queries";
 import { formatBRL, monthName } from "@/lib/excel/parser";
+import { getPaymentScope, PAYMENT_SCOPE_OPTIONS, type PaymentScope } from "@/lib/payment-type";
+import { normalizeText } from "@/lib/text-normalization";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,7 +51,7 @@ export const Route = createFileRoute("/_authenticated/variacao")({
 });
 
 type PeriodMode = "all" | "year" | "range";
-type SortKey = "nome" | "total" | "var" | string; // string = "m:YYYY-MM"
+type SortKey = "nome" | "total" | "var" | string;
 
 interface Row {
   prestador: string;
@@ -57,18 +59,27 @@ interface Row {
   uf: string | null;
   porMes: Record<string, number>;
   total: number;
-  varPct: number | null; // último vs primeiro mês com pagamento
+  varPct: number | null;
+}
+
+interface VariacaoRawRow {
+  prestador: string;
+  municipio: string | null;
+  uf: string | null;
+  valor_liquido: number | null;
+  conta_financeiro: string | null;
+  competencia: { mes: number; ano: number } | null;
 }
 
 async function fetchVariacaoData() {
   const { data, error } = await supabase
     .from("registros")
     .select(
-      "prestador, municipio, uf, valor_liquido, competencia:competencias(mes, ano)",
+      "prestador, municipio, uf, valor_liquido, conta_financeiro, competencia:competencias(mes, ano)",
     )
     .limit(50000);
   if (error) throw error;
-  return data ?? [];
+  return (data ?? []) as VariacaoRawRow[];
 }
 
 function VariacaoPage() {
@@ -86,6 +97,7 @@ function VariacaoPage() {
   const [fromKey, setFromKey] = useState<string>("");
   const [toKey, setToKey] = useState<string>("");
   const [search, setSearch] = useState("");
+  const [paymentScope, setPaymentScope] = useState<PaymentScope>("all");
   const [sortKey, setSortKey] = useState<SortKey>("total");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
@@ -105,9 +117,7 @@ function VariacaoPage() {
   );
 
   const monthKeys = useMemo(() => {
-    if (mode === "year" && year) {
-      return allMonthKeys.filter((k) => k.startsWith(year));
-    }
+    if (mode === "year" && year) return allMonthKeys.filter((k) => k.startsWith(year));
     if (mode === "range" && fromKey && toKey) {
       return allMonthKeys.filter((k) => k >= fromKey && k <= toKey);
     }
@@ -118,12 +128,15 @@ function VariacaoPage() {
     if (!raw.length || !monthKeys.length) return [];
     const monthSet = new Set(monthKeys);
     const map = new Map<string, Row>();
-    for (const r of raw as any[]) {
+
+    for (const r of raw) {
+      if (paymentScope !== "all" && getPaymentScope(r.conta_financeiro) !== paymentScope) continue;
       const c = r.competencia;
       if (!c) continue;
-      const k = `${c.ano}-${String(c.mes).padStart(2, "0")}`;
-      if (!monthSet.has(k)) continue;
-      const nome = r.prestador as string;
+      const key = `${c.ano}-${String(c.mes).padStart(2, "0")}`;
+      if (!monthSet.has(key)) continue;
+
+      const nome = r.prestador;
       let row = map.get(nome);
       if (!row) {
         row = {
@@ -136,42 +149,31 @@ function VariacaoPage() {
         };
         map.set(nome, row);
       }
-      const v = Number(r.valor_liquido) || 0;
-      row.porMes[k] = (row.porMes[k] ?? 0) + v;
-      row.total += v;
+
+      const value = Number(r.valor_liquido) || 0;
+      row.porMes[key] = (row.porMes[key] ?? 0) + value;
+      row.total += value;
     }
-    // garantir 0 nos meses sem pagamento + variação
-    // Regra: comparar SEMPRE o primeiro mês do período selecionado vs o último.
+
     const firstKey = monthKeys[0];
     const lastKey = monthKeys[monthKeys.length - 1];
     for (const row of map.values()) {
-      for (const k of monthKeys) {
-        row.porMes[k] = row.porMes[k] ?? 0;
-      }
+      for (const key of monthKeys) row.porMes[key] = row.porMes[key] ?? 0;
       const firstVal = row.porMes[firstKey] ?? 0;
       const lastVal = row.porMes[lastKey] ?? 0;
 
-      if (firstVal === 0 && lastVal === 0) {
-        // sem produção nas pontas — nada mudou entre início e fim do período
-        row.varPct = 0;
-      } else if (firstVal === 0 && lastVal > 0) {
-        // novo: não produzia no início, passou a produzir no fim
-        row.varPct = 1;
-      } else if (firstVal > 0 && lastVal === 0) {
-        // deixou de produzir no fim do período
-        row.varPct = -1;
-      } else {
-        row.varPct = (lastVal - firstVal) / firstVal;
-      }
+      if (firstVal === 0 && lastVal === 0) row.varPct = 0;
+      else if (firstVal === 0 && lastVal > 0) row.varPct = 1;
+      else if (firstVal > 0 && lastVal === 0) row.varPct = -1;
+      else row.varPct = (lastVal - firstVal) / firstVal;
     }
+
     return Array.from(map.values());
-  }, [raw, monthKeys]);
+  }, [raw, monthKeys, paymentScope]);
 
   const filtered = useMemo(() => {
-    const s = search.trim().toLowerCase();
-    let arr = s
-      ? rows.filter((r) => r.prestador.toLowerCase().includes(s))
-      : rows;
+    const s = normalizeText(search);
+    let arr = s ? rows.filter((r) => normalizeText(r.prestador).includes(s)) : rows;
     arr = [...arr].sort((a, b) => {
       let av: number | string;
       let bv: number | string;
@@ -185,13 +187,14 @@ function VariacaoPage() {
         av = a.varPct ?? -Infinity;
         bv = b.varPct ?? -Infinity;
       } else if (sortKey.startsWith("m:")) {
-        const k = sortKey.slice(2);
-        av = a.porMes[k] ?? 0;
-        bv = b.porMes[k] ?? 0;
+        const monthKey = sortKey.slice(2);
+        av = a.porMes[monthKey] ?? 0;
+        bv = b.porMes[monthKey] ?? 0;
       } else {
         av = 0;
         bv = 0;
       }
+
       if (typeof av === "string" && typeof bv === "string") {
         return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
       }
@@ -203,16 +206,16 @@ function VariacaoPage() {
   }, [rows, search, sortKey, sortDir]);
 
   const totalGeral = useMemo(
-    () => filtered.reduce((s, r) => s + r.total, 0),
+    () => filtered.reduce((sum, row) => sum + row.total, 0),
     [filtered],
   );
   const totalsPorMes = useMemo(() => {
-    const t: Record<string, number> = {};
-    for (const k of monthKeys) t[k] = 0;
-    for (const r of filtered) {
-      for (const k of monthKeys) t[k] += r.porMes[k] ?? 0;
+    const totals: Record<string, number> = {};
+    for (const key of monthKeys) totals[key] = 0;
+    for (const row of filtered) {
+      for (const key of monthKeys) totals[key] += row.porMes[key] ?? 0;
     }
-    return t;
+    return totals;
   }, [filtered, monthKeys]);
 
   const variacaoGlobal = useMemo(() => {
@@ -224,21 +227,21 @@ function VariacaoPage() {
   }, [totalsPorMes, monthKeys]);
 
   const cresc = useMemo(
-    () => filtered.filter((r) => (r.varPct ?? 0) > 0).length,
+    () => filtered.filter((row) => (row.varPct ?? 0) > 0).length,
     [filtered],
   );
   const queda = useMemo(
-    () => filtered.filter((r) => (r.varPct ?? 0) < 0).length,
+    () => filtered.filter((row) => (row.varPct ?? 0) < 0).length,
     [filtered],
   );
 
   const chartData = useMemo(
     () =>
-      monthKeys.map((k) => {
-        const [y, m] = k.split("-");
+      monthKeys.map((key) => {
+        const [yearValue, monthValue] = key.split("-");
         return {
-          mes: `${monthName(Number(m))}/${y.slice(2)}`,
-          total: totalsPorMes[k] ?? 0,
+          mes: `${monthName(Number(monthValue))}/${yearValue.slice(2)}`,
+          total: totalsPorMes[key] ?? 0,
         };
       }),
     [monthKeys, totalsPorMes],
@@ -247,11 +250,11 @@ function VariacaoPage() {
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const toggleSort = (k: SortKey) => {
-    if (sortKey === k) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
     else {
-      setSortKey(k);
-      setSortDir(k === "nome" ? "asc" : "desc");
+      setSortKey(key);
+      setSortDir(key === "nome" ? "asc" : "desc");
     }
     setPage(1);
   };
@@ -260,19 +263,19 @@ function VariacaoPage() {
     const header = [
       "Prestador",
       "Município/UF",
-      ...monthKeys.map((k) => {
-        const [y, m] = k.split("-");
-        return `Valor Líquido ${m}/${y}`;
+      ...monthKeys.map((key) => {
+        const [yearValue, monthValue] = key.split("-");
+        return `Valor Líquido ${monthValue}/${yearValue}`;
       }),
       "Total",
       "Variação %",
     ];
-    const body = filtered.map((r) => [
-      r.prestador,
-      [r.municipio, r.uf].filter(Boolean).join("/"),
-      ...monthKeys.map((k) => r.porMes[k] ?? 0),
-      r.total,
-      r.varPct ?? 0,
+    const body = filtered.map((row) => [
+      row.prestador,
+      [row.municipio, row.uf].filter(Boolean).join("/"),
+      ...monthKeys.map((key) => row.porMes[key] ?? 0),
+      row.total,
+      row.varPct ?? 0,
     ]);
     const ws = XLSX.utils.aoa_to_sheet([header, ...body]);
     const wb = XLSX.utils.book_new();
@@ -306,7 +309,6 @@ function VariacaoPage() {
         </Button>
       </div>
 
-      {/* Filtros */}
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3 pt-6">
           <div className="space-y-1">
@@ -315,8 +317,8 @@ function VariacaoPage() {
             </label>
             <Select
               value={mode}
-              onValueChange={(v) => {
-                setMode(v as PeriodMode);
+              onValueChange={(value) => {
+                setMode(value as PeriodMode);
                 setPage(1);
               }}
             >
@@ -341,9 +343,9 @@ function VariacaoPage() {
                   <SelectValue placeholder="Selecione" />
                 </SelectTrigger>
                 <SelectContent>
-                  {years.map((y) => (
-                    <SelectItem key={y} value={String(y)}>
-                      {y}
+                  {years.map((yearValue) => (
+                    <SelectItem key={yearValue} value={String(yearValue)}>
+                      {yearValue}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -362,9 +364,9 @@ function VariacaoPage() {
                     <SelectValue placeholder="Mês inicial" />
                   </SelectTrigger>
                   <SelectContent>
-                    {allMonthKeys.map((k) => (
-                      <SelectItem key={k} value={k}>
-                        {k}
+                    {allMonthKeys.map((key) => (
+                      <SelectItem key={key} value={key}>
+                        {key}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -379,9 +381,9 @@ function VariacaoPage() {
                     <SelectValue placeholder="Mês final" />
                   </SelectTrigger>
                   <SelectContent>
-                    {allMonthKeys.map((k) => (
-                      <SelectItem key={k} value={k}>
-                        {k}
+                    {allMonthKeys.map((key) => (
+                      <SelectItem key={key} value={key}>
+                        {key}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -389,6 +391,30 @@ function VariacaoPage() {
               </div>
             </>
           )}
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              Tipo de pagamento
+            </label>
+            <Select
+              value={paymentScope}
+              onValueChange={(value) => {
+                setPaymentScope(value as PaymentScope);
+                setPage(1);
+              }}
+            >
+              <SelectTrigger className="w-[180px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PAYMENT_SCOPE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
 
           <div className="ml-auto space-y-1">
             <label className="text-xs font-medium text-muted-foreground">
@@ -407,7 +433,6 @@ function VariacaoPage() {
         </CardContent>
       </Card>
 
-      {/* KPIs */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="pb-2">
@@ -454,7 +479,6 @@ function VariacaoPage() {
         </Card>
       </div>
 
-      {/* Gráfico evolução */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Evolução mensal — total pago</CardTitle>
@@ -484,7 +508,6 @@ function VariacaoPage() {
         </CardContent>
       </Card>
 
-      {/* Tabela */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="text-base">
@@ -517,77 +540,66 @@ function VariacaoPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead
-                    className="cursor-pointer"
-                    onClick={() => toggleSort("nome")}
-                  >
+                  <TableHead className="cursor-pointer" onClick={() => toggleSort("nome")}>
                     Prestador <SortIcon k="nome" />
                   </TableHead>
                   <TableHead>Município/UF</TableHead>
-                  {monthKeys.map((k) => {
-                    const [y, m] = k.split("-");
+                  {monthKeys.map((key) => {
+                    const [yearValue, monthValue] = key.split("-");
                     return (
                       <TableHead
-                        key={k}
+                        key={key}
                         className="cursor-pointer text-right"
-                        onClick={() => toggleSort(`m:${k}`)}
+                        onClick={() => toggleSort(`m:${key}`)}
                       >
-                        {monthName(Number(m))}/{y.slice(2)}{" "}
-                        <SortIcon k={`m:${k}`} />
+                        {monthName(Number(monthValue))}/{yearValue.slice(2)}{" "}
+                        <SortIcon k={`m:${key}`} />
                       </TableHead>
                     );
                   })}
-                  <TableHead
-                    className="cursor-pointer text-right"
-                    onClick={() => toggleSort("total")}
-                  >
+                  <TableHead className="cursor-pointer text-right" onClick={() => toggleSort("total")}>
                     Total <SortIcon k="total" />
                   </TableHead>
-                  <TableHead
-                    className="cursor-pointer text-right"
-                    onClick={() => toggleSort("var")}
-                  >
+                  <TableHead className="cursor-pointer text-right" onClick={() => toggleSort("var")}>
                     Var % <SortIcon k="var" />
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {pageRows.map((r) => (
-                  <TableRow key={r.prestador}>
-                    <TableCell className="font-medium">{r.prestador}</TableCell>
+                {pageRows.map((row) => (
+                  <TableRow key={row.prestador}>
+                    <TableCell className="font-medium">{row.prestador}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {[r.municipio, r.uf].filter(Boolean).join("/")}
+                      {[row.municipio, row.uf].filter(Boolean).join("/")}
                     </TableCell>
-                    {monthKeys.map((k) => {
-                      const v = r.porMes[k] ?? 0;
+                    {monthKeys.map((key) => {
+                      const value = row.porMes[key] ?? 0;
                       return (
                         <TableCell
-                          key={k}
-                          className={`text-right tabular-nums ${
-                            v === 0 ? "text-muted-foreground" : ""
-                          }`}
+                          key={key}
+                          className={`text-right tabular-nums ${value === 0 ? "text-muted-foreground" : ""}`}
                         >
-                          {formatBRL(v)}
+                          {formatBRL(value)}
                         </TableCell>
                       );
                     })}
                     <TableCell className="text-right font-semibold tabular-nums">
-                      {formatBRL(r.total)}
+                      {formatBRL(row.total)}
                     </TableCell>
                     <TableCell
                       className={`text-right font-semibold tabular-nums ${
-                        r.varPct == null
+                        row.varPct == null
                           ? "text-muted-foreground"
-                          : r.varPct > 0
+                          : row.varPct > 0
                             ? "text-emerald-600"
-                            : r.varPct < 0
+                            : row.varPct < 0
                               ? "text-red-600"
                               : ""
                       }`}
                     >
-                      {r.varPct == null
+                      {row.varPct == null
                         ? "—"
-                        : `${r.varPct > 0 ? "+" : ""}${(r.varPct * 100).toFixed(1)}%`}
+                        : `${row.varPct > 0 ? "+" : ""}${(row.varPct * 100).toFixed(1)}%`}
                     </TableCell>
                   </TableRow>
                 ))}

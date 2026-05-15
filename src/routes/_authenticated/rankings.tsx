@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { fetchCompetencias, fetchRegistros } from "@/lib/queries";
+import { PAYMENT_SCOPE_OPTIONS, filterRegistrosByPaymentScope, type PaymentScope } from "@/lib/payment-type";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatBRL, monthName } from "@/lib/excel/parser";
@@ -14,6 +15,7 @@ export const Route = createFileRoute("/_authenticated/rankings")({
 function RankingsPage() {
   const { data: comps = [] } = useQuery({ queryKey: ["competencias"], queryFn: fetchCompetencias });
   const [compId, setCompId] = useState("");
+  const [paymentScope, setPaymentScope] = useState<PaymentScope>("all");
   const cur = compId || comps[0]?.id;
   const { data: regs = [] } = useQuery({
     queryKey: ["regs", cur],
@@ -22,8 +24,9 @@ function RankingsPage() {
   });
 
   const ranking = useMemo(() => {
+    const filteredRegs = filterRegistrosByPaymentScope(regs, paymentScope);
     const map = new Map<string, { valor: number; qtd: number; municipio?: string | null }>();
-    for (const r of regs) {
+    for (const r of filteredRegs) {
       const k = r.prestador;
       const e = map.get(k) ?? { valor: 0, qtd: 0, municipio: r.municipio };
       e.valor += Number(r.valor_liquido);
@@ -33,7 +36,7 @@ function RankingsPage() {
     return Array.from(map.entries())
       .map(([nome, v]) => ({ nome, ...v }))
       .sort((a, b) => b.valor - a.valor);
-  }, [regs]);
+  }, [regs, paymentScope]);
 
   return (
     <div className="space-y-6">
@@ -42,14 +45,22 @@ function RankingsPage() {
           <h1 className="text-3xl font-bold tracking-tight">Rankings</h1>
           <p className="text-muted-foreground text-sm mt-1">Maiores e menores produções</p>
         </div>
-        {comps.length > 0 && (
-          <Select value={cur} onValueChange={setCompId}>
-            <SelectTrigger className="w-[200px]"><SelectValue /></SelectTrigger>
+        <div className="flex flex-wrap gap-3">
+          <Select value={paymentScope} onValueChange={(value) => setPaymentScope(value as PaymentScope)}>
+            <SelectTrigger className="w-[180px]"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {comps.map((c) => <SelectItem key={c.id} value={c.id}>{monthName(c.mes)}/{c.ano}</SelectItem>)}
+              {PAYMENT_SCOPE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
             </SelectContent>
           </Select>
-        )}
+          {comps.length > 0 && (
+            <Select value={cur} onValueChange={setCompId}>
+              <SelectTrigger className="w-[200px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {comps.map((c) => <SelectItem key={c.id} value={c.id}>{monthName(c.mes)}/{c.ano}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
         <RankList title="Maior produção" icon={Trophy} items={ranking.slice(0, 10)} variant="top" />

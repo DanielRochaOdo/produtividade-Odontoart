@@ -1,12 +1,17 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import {
+  fetchAllRegistrosWithCompetencia,
   fetchCompetencias,
-  fetchRegistros,
-  type Registro,
   type Competencia,
+  type Registro,
 } from "@/lib/queries";
+import {
+  PAYMENT_SCOPE_OPTIONS,
+  filterRegistrosByPaymentScope,
+  type PaymentScope,
+} from "@/lib/payment-type";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Select,
@@ -15,7 +20,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
 import {
   Bar,
   BarChart,
@@ -41,15 +45,24 @@ import {
   ArrowRight,
 } from "lucide-react";
 import { formatBRL, monthName } from "@/lib/excel/parser";
-import { Link } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/_authenticated/")({
   component: Dashboard,
 });
 
+type RegistroWithCompetencia = Registro & {
+  competencia?: { mes: number; ano: number } | null;
+};
+
 function Dashboard() {
   const { data: comps = [] } = useQuery({ queryKey: ["competencias"], queryFn: fetchCompetencias });
+  const { data: allRegs = [] } = useQuery({
+    queryKey: ["regs-all-with-comp"],
+    queryFn: fetchAllRegistrosWithCompetencia,
+    enabled: comps.length > 0,
+  });
   const [selected, setSelected] = useState<string | null>(null);
+  const [paymentScope, setPaymentScope] = useState<PaymentScope>("all");
 
   const currentComp = selected
     ? comps.find((c) => c.id === selected)
@@ -58,21 +71,32 @@ function Dashboard() {
     ? comps[comps.findIndex((c) => c.id === currentComp.id) + 1]
     : null;
 
-  const { data: regCurrent = [] } = useQuery({
-    queryKey: ["regs", currentComp?.id],
-    queryFn: () => fetchRegistros(currentComp?.id),
-    enabled: !!currentComp,
-  });
-  const { data: regPrev = [] } = useQuery({
-    queryKey: ["regs", previousComp?.id],
-    queryFn: () => fetchRegistros(previousComp?.id),
-    enabled: !!previousComp,
-  });
+  const registrosFiltrados = useMemo(
+    () => filterRegistrosByPaymentScope(allRegs as RegistroWithCompetencia[], paymentScope),
+    [allRegs, paymentScope],
+  );
+  const regCurrent = useMemo(
+    () =>
+      currentComp
+        ? registrosFiltrados.filter((registro) => registro.competencia_id === currentComp.id)
+        : [],
+    [currentComp, registrosFiltrados],
+  );
+  const regPrev = useMemo(
+    () =>
+      previousComp
+        ? registrosFiltrados.filter((registro) => registro.competencia_id === previousComp.id)
+        : [],
+    [previousComp, registrosFiltrados],
+  );
 
   const kpis = useMemo(() => computeKpis(regCurrent, regPrev), [regCurrent, regPrev]);
   const topPrestadores = useMemo(() => topBy(regCurrent, "prestador", "valor_liquido", 10), [regCurrent]);
   const topMunicipios = useMemo(() => topBy(regCurrent, "municipio", "valor_liquido", 6), [regCurrent]);
-  const evolucao = useMemo(() => buildEvolucao(comps), [comps]);
+  const evolucao = useMemo(
+    () => buildEvolucao(comps, registrosFiltrados),
+    [comps, registrosFiltrados],
+  );
   const breakdown = useMemo(() => {
     const sum = (k: keyof Registro) => regCurrent.reduce((a, r) => a + Number(r[k] || 0), 0);
     return [
@@ -104,18 +128,32 @@ function Dashboard() {
             Visão consolidada da produtividade odontológica
           </p>
         </div>
-        <Select value={currentComp?.id} onValueChange={setSelected}>
-          <SelectTrigger className="w-[220px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {comps.map((c) => (
-              <SelectItem key={c.id} value={c.id}>
-                {monthName(c.mes)}/{c.ano} — {c.registros_count} reg.
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex flex-wrap gap-3">
+          <Select value={paymentScope} onValueChange={(value) => setPaymentScope(value as PaymentScope)}>
+            <SelectTrigger className="w-[180px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAYMENT_SCOPE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={currentComp?.id} onValueChange={setSelected}>
+            <SelectTrigger className="w-[220px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {comps.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {monthName(c.mes)}/{c.ano} — {c.registros_count} reg.
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -339,11 +377,19 @@ function topBy(regs: Registro[], key: keyof Registro, valKey: keyof Registro, n:
     .slice(0, n);
 }
 
-function buildEvolucao(comps: Competencia[]) {
+function buildEvolucao(comps: Competencia[], registros: Registro[]) {
+  const totalsByCompetencia = new Map<string, number>();
+  for (const registro of registros) {
+    totalsByCompetencia.set(
+      registro.competencia_id,
+      (totalsByCompetencia.get(registro.competencia_id) ?? 0) + Number(registro.valor_liquido || 0),
+    );
+  }
+
   return [...comps]
     .reverse()
     .map((c) => ({
       label: `${monthName(c.mes)}/${String(c.ano).slice(2)}`,
-      total: Number(c.valor_total) || 0,
+      total: totalsByCompetencia.get(c.id) ?? 0,
     }));
 }
