@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { fetchCompetencias, fetchAllRegistrosWithCompetencia } from "@/lib/queries";
+import { getPaymentScope, PAYMENT_SCOPE_OPTIONS, type PaymentScope } from "@/lib/payment-type";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -30,10 +31,18 @@ interface Alerta {
   mes: number;
 }
 
+interface RegistroComCompetencia {
+  prestador: string;
+  cnpj: string | null;
+  valor_liquido: number | null;
+  conta_financeiro: string | null;
+  competencia: { mes: number; ano: number } | null;
+}
+
 const meta: Record<Tipo, { icon: React.ComponentType<{ className?: string }>; cls: string; label: string }> = {
   queda: { icon: TrendingDown, cls: "border-destructive/40 bg-destructive/5", label: "Queda" },
-  alta: { icon: TrendingUp, cls: "border-warning/40 bg-warning/5", label: "Crescimento atípico" },
-  zero: { icon: Ban, cls: "border-destructive/40 bg-destructive/5", label: "Sem produção" },
+  alta: { icon: TrendingUp, cls: "border-warning/40 bg-warning/5", label: "Crescimento atipico" },
+  zero: { icon: Ban, cls: "border-destructive/40 bg-destructive/5", label: "Sem producao" },
   nova: { icon: Sparkles, cls: "border-success/40 bg-success/5", label: "Nova entrada" },
   anomalia: { icon: AlertTriangle, cls: "border-warning/40 bg-warning/5", label: "Anomalia" },
 };
@@ -55,6 +64,7 @@ function AlertasPage() {
 
   const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState<string>("");
+  const [paymentScope, setPaymentScope] = useState<PaymentScope>("all");
   const [tipos, setTipos] = useState<Tipo[]>(["queda", "alta", "zero", "nova"]);
 
   const effectiveFrom = from || (sortedComps[0] ? compKey(sortedComps[0]) : "");
@@ -63,96 +73,94 @@ function AlertasPage() {
   const alertas = useMemo<Alerta[]>(() => {
     if (!sortedComps.length || !allRegs.length) return [];
 
-    // Group registros by competencia key
     const byComp = new Map<string, Map<string, { nome: string; total: number }>>();
-    for (const r of allRegs as any[]) {
+    for (const r of allRegs as RegistroComCompetencia[]) {
+      if (paymentScope !== "all" && getPaymentScope(r.conta_financeiro) !== paymentScope) continue;
       const c = r.competencia;
       if (!c) continue;
-      const ck = compKey(c);
-      if (!byComp.has(ck)) byComp.set(ck, new Map());
-      const m = byComp.get(ck)!;
-      const k = r.cnpj || r.prestador;
-      const e = m.get(k) ?? { nome: r.prestador, total: 0 };
-      e.total += Number(r.valor_liquido) || 0;
-      m.set(k, e);
+      const competenciaKey = compKey(c);
+      if (!byComp.has(competenciaKey)) byComp.set(competenciaKey, new Map());
+      const competenciaMap = byComp.get(competenciaKey)!;
+      const key = r.cnpj || r.prestador;
+      const entry = competenciaMap.get(key) ?? { nome: r.prestador, total: 0 };
+      entry.total += Number(r.valor_liquido) || 0;
+      competenciaMap.set(key, entry);
     }
 
     const list: Alerta[] = [];
     for (let i = 1; i < sortedComps.length; i++) {
-      const cur = sortedComps[i];
-      const prev = sortedComps[i - 1];
-      const ck = compKey(cur);
-      if (ck < effectiveFrom || ck > effectiveTo) continue;
+      const current = sortedComps[i];
+      const previous = sortedComps[i - 1];
+      const currentKey = compKey(current);
+      if (currentKey < effectiveFrom || currentKey > effectiveTo) continue;
 
-      const a = byComp.get(ck) ?? new Map();
-      const b = byComp.get(compKey(prev)) ?? new Map();
+      const currentMap = byComp.get(currentKey) ?? new Map();
+      const previousMap = byComp.get(compKey(previous)) ?? new Map();
 
-      // Quedas / Altas / Zero baseadas em quem produzia antes
-      for (const [k, v] of b) {
-        const at = a.get(k);
-        if (!at || at.total === 0) {
+      for (const [key, value] of previousMap) {
+        const currentValue = currentMap.get(key);
+        if (!currentValue || currentValue.total === 0) {
           list.push({
             tipo: "zero",
-            prestador: v.nome,
-            cnpj: k,
-            competencia: compLabel(cur),
-            competenciaAnterior: compLabel(prev),
-            valorAnterior: v.total,
+            prestador: value.nome,
+            cnpj: key,
+            competencia: compLabel(current),
+            competenciaAnterior: compLabel(previous),
+            valorAnterior: value.total,
             valorAtual: 0,
             variacaoPct: -100,
-            desc: `Produzia ${formatBRL(v.total)} em ${compLabel(prev)} e zerou em ${compLabel(cur)}`,
-            ano: cur.ano,
-            mes: cur.mes,
+            desc: `Produzia ${formatBRL(value.total)} em ${compLabel(previous)} e zerou em ${compLabel(current)}`,
+            ano: current.ano,
+            mes: current.mes,
           });
         } else {
-          const delta = ((at.total - v.total) / v.total) * 100;
+          const delta = ((currentValue.total - value.total) / value.total) * 100;
           if (delta < -30) {
             list.push({
               tipo: "queda",
-              prestador: v.nome,
-              cnpj: k,
-              competencia: compLabel(cur),
-              competenciaAnterior: compLabel(prev),
-              valorAnterior: v.total,
-              valorAtual: at.total,
+              prestador: value.nome,
+              cnpj: key,
+              competencia: compLabel(current),
+              competenciaAnterior: compLabel(previous),
+              valorAnterior: value.total,
+              valorAtual: currentValue.total,
               variacaoPct: delta,
-              desc: `Queda de ${delta.toFixed(1)}% — ${formatBRL(v.total)} → ${formatBRL(at.total)}`,
-              ano: cur.ano,
-              mes: cur.mes,
+              desc: `Queda de ${delta.toFixed(1)}% - ${formatBRL(value.total)} -> ${formatBRL(currentValue.total)}`,
+              ano: current.ano,
+              mes: current.mes,
             });
           } else if (delta > 50) {
             list.push({
               tipo: "alta",
-              prestador: v.nome,
-              cnpj: k,
-              competencia: compLabel(cur),
-              competenciaAnterior: compLabel(prev),
-              valorAnterior: v.total,
-              valorAtual: at.total,
+              prestador: value.nome,
+              cnpj: key,
+              competencia: compLabel(current),
+              competenciaAnterior: compLabel(previous),
+              valorAnterior: value.total,
+              valorAtual: currentValue.total,
               variacaoPct: delta,
-              desc: `Crescimento de ${delta.toFixed(1)}% — ${formatBRL(v.total)} → ${formatBRL(at.total)}`,
-              ano: cur.ano,
-              mes: cur.mes,
+              desc: `Crescimento de ${delta.toFixed(1)}% - ${formatBRL(value.total)} -> ${formatBRL(currentValue.total)}`,
+              ano: current.ano,
+              mes: current.mes,
             });
           }
         }
       }
 
-      // Novas entradas: estavam zerados/ausentes antes e produziram agora
-      for (const [k, at] of a) {
-        if (!b.has(k) && at.total > 0) {
+      for (const [key, currentValue] of currentMap) {
+        if (!previousMap.has(key) && currentValue.total > 0) {
           list.push({
             tipo: "nova",
-            prestador: at.nome,
-            cnpj: k,
-            competencia: compLabel(cur),
-            competenciaAnterior: compLabel(prev),
+            prestador: currentValue.nome,
+            cnpj: key,
+            competencia: compLabel(current),
+            competenciaAnterior: compLabel(previous),
             valorAnterior: 0,
-            valorAtual: at.total,
+            valorAtual: currentValue.total,
             variacaoPct: 100,
-            desc: `Nova produção em ${compLabel(cur)} — ${formatBRL(at.total)}`,
-            ano: cur.ano,
-            mes: cur.mes,
+            desc: `Nova producao em ${compLabel(current)} - ${formatBRL(currentValue.total)}`,
+            ano: current.ano,
+            mes: current.mes,
           });
         }
       }
@@ -163,30 +171,30 @@ function AlertasPage() {
       if (a.mes !== b.mes) return b.mes - a.mes;
       return Math.abs(b.variacaoPct) - Math.abs(a.variacaoPct);
     });
-  }, [sortedComps, allRegs, effectiveFrom, effectiveTo]);
+  }, [sortedComps, allRegs, effectiveFrom, effectiveTo, paymentScope]);
 
   const filtrados = useMemo(
-    () => alertas.filter((a) => tipos.includes(a.tipo)),
+    () => alertas.filter((alerta) => tipos.includes(alerta.tipo)),
     [alertas, tipos],
   );
 
   const counts = useMemo(() => {
-    const c: Record<Tipo, number> = { queda: 0, alta: 0, zero: 0, nova: 0, anomalia: 0 };
-    for (const a of alertas) c[a.tipo]++;
-    return c;
+    const result: Record<Tipo, number> = { queda: 0, alta: 0, zero: 0, nova: 0, anomalia: 0 };
+    for (const alerta of alertas) result[alerta.tipo]++;
+    return result;
   }, [alertas]);
 
   const exportar = () => {
-    const rows = filtrados.map((a) => ({
-      Competência: a.competencia,
-      "Competência Anterior": a.competenciaAnterior,
-      Motivo: meta[a.tipo].label,
-      Prestador: a.prestador,
-      CNPJ: a.cnpj,
-      "Valor Anterior": Number(a.valorAnterior.toFixed(2)),
-      "Valor Atual": Number(a.valorAtual.toFixed(2)),
-      "Variação %": Number(a.variacaoPct.toFixed(2)),
-      Descrição: a.desc,
+    const rows = filtrados.map((alerta) => ({
+      Competencia: alerta.competencia,
+      "Competencia Anterior": alerta.competenciaAnterior,
+      Motivo: meta[alerta.tipo].label,
+      Prestador: alerta.prestador,
+      CNPJ: alerta.cnpj,
+      "Valor Anterior": Number(alerta.valorAnterior.toFixed(2)),
+      "Valor Atual": Number(alerta.valorAtual.toFixed(2)),
+      "Variacao %": Number(alerta.variacaoPct.toFixed(2)),
+      Descricao: alerta.desc,
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
@@ -200,7 +208,7 @@ function AlertasPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Alertas Gerenciais</h1>
           <p className="text-muted-foreground text-sm mt-1">
-            Variações relevantes por prestador entre competências
+            Variacoes relevantes por prestador entre competencias
           </p>
         </div>
         <Button onClick={exportar} disabled={!filtrados.length} className="gap-2">
@@ -215,7 +223,7 @@ function AlertasPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">De</label>
               <Select value={effectiveFrom} onValueChange={setFrom}>
@@ -228,12 +236,23 @@ function AlertasPage() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Até</label>
+              <label className="text-xs font-medium text-muted-foreground">Ate</label>
               <Select value={effectiveTo} onValueChange={setTo}>
                 <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
                 <SelectContent>
                   {sortedComps.map((c) => (
                     <SelectItem key={compKey(c)} value={compKey(c)}>{compLabel(c)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Tipo de pagamento</label>
+              <Select value={paymentScope} onValueChange={(value) => setPaymentScope(value as PaymentScope)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PAYMENT_SCOPE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -245,16 +264,16 @@ function AlertasPage() {
             <ToggleGroup
               type="multiple"
               value={tipos}
-              onValueChange={(v) => v.length && setTipos(v as Tipo[])}
+              onValueChange={(value) => value.length && setTipos(value as Tipo[])}
               className="flex-wrap justify-start gap-2"
             >
-              {(Object.keys(meta) as Tipo[]).filter((t) => t !== "anomalia").map((t) => {
-                const M = meta[t];
+              {(Object.keys(meta) as Tipo[]).filter((tipo) => tipo !== "anomalia").map((tipo) => {
+                const itemMeta = meta[tipo];
                 return (
-                  <ToggleGroupItem key={t} value={t} className="gap-2 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground">
-                    <M.icon className="h-4 w-4" />
-                    {M.label}
-                    <span className="ml-1 text-xs opacity-70">({counts[t]})</span>
+                  <ToggleGroupItem key={tipo} value={tipo} className="gap-2 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground">
+                    <itemMeta.icon className="h-4 w-4" />
+                    {itemMeta.label}
+                    <span className="ml-1 text-xs opacity-70">({counts[tipo]})</span>
                   </ToggleGroupItem>
                 );
               })}
@@ -264,7 +283,7 @@ function AlertasPage() {
       </Card>
 
       <div className="text-sm text-muted-foreground">
-        {filtrados.length} alerta{filtrados.length === 1 ? "" : "s"} no período
+        {filtrados.length} alerta{filtrados.length === 1 ? "" : "s"} no periodo
       </div>
 
       {!filtrados.length ? (
@@ -275,26 +294,26 @@ function AlertasPage() {
         </Card>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-          {filtrados.map((a, i) => {
-            const M = meta[a.tipo];
+          {filtrados.map((alerta, index) => {
+            const itemMeta = meta[alerta.tipo];
             return (
-              <Card key={i} className={`shadow-card border-l-4 ${M.cls}`}>
+              <Card key={index} className={`shadow-card border-l-4 ${itemMeta.cls}`}>
                 <CardHeader className="pb-2">
                   <div className="flex items-center justify-between gap-2">
                     <CardTitle className="text-sm flex items-center gap-2">
-                      <M.icon className="h-4 w-4" />
-                      {M.label}
+                      <itemMeta.icon className="h-4 w-4" />
+                      {itemMeta.label}
                     </CardTitle>
                     <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                      {a.competencia}
+                      {alerta.competencia}
                     </span>
                   </div>
                   <CardDescription className="font-medium text-foreground text-sm truncate">
-                    {a.prestador}
+                    {alerta.prestador}
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-xs text-muted-foreground">{a.desc}</p>
+                  <p className="text-xs text-muted-foreground">{alerta.desc}</p>
                 </CardContent>
               </Card>
             );

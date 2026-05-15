@@ -11,6 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { formatBRL, monthName } from "@/lib/excel/parser";
+import { PAYMENT_SCOPE_OPTIONS, filterRegistrosByPaymentScope, type PaymentScope } from "@/lib/payment-type";
+import { normalizeText } from "@/lib/text-normalization";
 import { Pencil, Search, Download } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -25,6 +27,7 @@ function RegistrosPage() {
   const { data: comps = [] } = useQuery({ queryKey: ["competencias"], queryFn: fetchCompetencias });
   const [compId, setCompId] = useState<string>("");
   const [search, setSearch] = useState("");
+  const [paymentScope, setPaymentScope] = useState<PaymentScope>("all");
   const [editing, setEditing] = useState<Registro | null>(null);
 
   const { data: registros = [], isLoading } = useQuery({
@@ -34,15 +37,16 @@ function RegistrosPage() {
   });
 
   const filtered = useMemo(() => {
-    const s = search.toLowerCase();
-    if (!s) return registros;
-    return registros.filter(
+    const scoped = filterRegistrosByPaymentScope(registros, paymentScope);
+    const s = normalizeText(search);
+    if (!s) return scoped;
+    return scoped.filter(
       (r) =>
-        r.prestador.toLowerCase().includes(s) ||
-        r.cnpj?.toLowerCase().includes(s) ||
-        r.municipio?.toLowerCase().includes(s)
+        normalizeText(r.prestador).includes(s) ||
+        normalizeText(r.cnpj).includes(s) ||
+        normalizeText(r.municipio).includes(s)
     );
-  }, [registros, search]);
+  }, [registros, paymentScope, search]);
 
   const exportExcel = () => {
     const ws = XLSX.utils.json_to_sheet(filtered);
@@ -66,7 +70,7 @@ function RegistrosPage() {
       </div>
 
       <Card>
-        <CardContent className="pt-6 grid gap-3 md:grid-cols-2">
+        <CardContent className="pt-6 grid gap-3 md:grid-cols-3">
           <div>
             <Label className="text-xs">Competência</Label>
             <Select value={compId || comps[0]?.id || ""} onValueChange={setCompId}>
@@ -74,6 +78,17 @@ function RegistrosPage() {
               <SelectContent>
                 {comps.map((c) => (
                   <SelectItem key={c.id} value={c.id}>{monthName(c.mes)}/{c.ano}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label className="text-xs">Tipo de pagamento</Label>
+            <Select value={paymentScope} onValueChange={(value) => setPaymentScope(value as PaymentScope)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {PAYMENT_SCOPE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
