@@ -2,6 +2,24 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
+function parseJwtPayload(token: string) {
+  try {
+    const [, payload] = token.split('.');
+    if (!payload) return null;
+
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
+
+    if (typeof window === 'undefined') {
+      return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+    }
+
+    return JSON.parse(window.atob(padded));
+  } catch {
+    return null;
+  }
+}
+
 function createSupabaseClient() {
   // Use import.meta.env for client-side (Vite build-time replacement)
   // Fall back to process.env for SSR (server-side rendering)
@@ -14,6 +32,14 @@ function createSupabaseClient() {
       ...(!SUPABASE_PUBLISHABLE_KEY ? ['SUPABASE_PUBLISHABLE_KEY'] : []),
     ];
     const message = `Missing Supabase environment variable(s): ${missing.join(', ')}. Connect Supabase in Lovable Cloud.`;
+    console.error(`[Supabase] ${message}`);
+    throw new Error(message);
+  }
+
+  const jwtPayload = parseJwtPayload(SUPABASE_PUBLISHABLE_KEY);
+  if (jwtPayload?.role === 'service_role') {
+    const message =
+      'Invalid Supabase client key: VITE_SUPABASE_PUBLISHABLE_KEY is using a service_role key. Use the project anon/publishable key in the browser and keep the service role key only on the server.';
     console.error(`[Supabase] ${message}`);
     throw new Error(message);
   }
@@ -37,4 +63,3 @@ export const supabase = new Proxy({} as ReturnType<typeof createSupabaseClient>,
     return Reflect.get(_supabase, prop, receiver);
   },
 });
-

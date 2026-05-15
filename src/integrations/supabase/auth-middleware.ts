@@ -4,6 +4,19 @@ import { getRequest } from '@tanstack/react-start/server'
 import { createClient } from '@supabase/supabase-js'
 import type { Database } from './types'
 
+function parseJwtPayload(token: string) {
+  try {
+    const [, payload] = token.split('.')
+    if (!payload) return null
+
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=')
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
 
 
 export const requireSupabaseAuth = createMiddleware({ type: 'function' }).server(
@@ -18,6 +31,14 @@ export const requireSupabaseAuth = createMiddleware({ type: 'function' }).server
         ...(!SUPABASE_PUBLISHABLE_KEY ? ['SUPABASE_PUBLISHABLE_KEY'] : []),
       ];
       const message = `Missing Supabase environment variable(s): ${missing.join(', ')}. Connect Supabase in Lovable Cloud.`;
+      console.error(`[Supabase] ${message}`);
+      throw new Response(message, { status: 500 });
+    }
+
+    const jwtPayload = parseJwtPayload(SUPABASE_PUBLISHABLE_KEY)
+    if (jwtPayload?.role === 'service_role') {
+      const message =
+        'Invalid Supabase server auth config: SUPABASE_PUBLISHABLE_KEY is using a service_role key. Use the anon/publishable key for auth validation.';
       console.error(`[Supabase] ${message}`);
       throw new Response(message, { status: 500 });
     }
