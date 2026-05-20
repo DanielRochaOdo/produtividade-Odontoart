@@ -12,6 +12,7 @@ export const PAYMENT_SCOPE_OPTIONS: { value: PaymentScope; label: string }[] = [
 export function getPaymentScope(value: string | null | undefined): Exclude<PaymentScope, "all"> | null {
   const normalized = normalizeText(value);
   if (normalized.includes("EXTERN")) return "externo";
+  if (normalized.includes("ODONTOMOVEL")) return "interno";
   if (normalized.includes("INTERN")) return "interno";
   return null;
 }
