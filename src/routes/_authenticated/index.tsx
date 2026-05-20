@@ -2,8 +2,8 @@ import { Link, createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import {
-  fetchAllRegistrosWithCompetencia,
   fetchCompetencias,
+  fetchRegistrosByCompetencias,
   type Competencia,
   type Registro,
 } from "@/lib/queries";
@@ -54,26 +54,46 @@ type RegistroWithCompetencia = Registro & {
   competencia?: { mes: number; ano: number } | null;
 };
 
+type EvolucaoRegistro = Pick<Registro, "competencia_id" | "valor_liquido" | "conta_financeiro">;
+
 function Dashboard() {
   const { data: comps = [] } = useQuery({ queryKey: ["competencias"], queryFn: fetchCompetencias });
-  const { data: allRegs = [] } = useQuery({
-    queryKey: ["regs-all-with-comp"],
-    queryFn: fetchAllRegistrosWithCompetencia,
-    enabled: comps.length > 0,
-  });
   const [selected, setSelected] = useState<string | null>(null);
   const [paymentScope, setPaymentScope] = useState<PaymentScope>("all");
 
-  const currentComp = selected
-    ? comps.find((c) => c.id === selected)
-    : comps[0];
+  const currentComp = selected ? comps.find((c) => c.id === selected) : comps[0];
   const previousComp = currentComp
     ? comps[comps.findIndex((c) => c.id === currentComp.id) + 1]
     : null;
 
+  const currentAndPreviousIds = useMemo(
+    () => [currentComp?.id, previousComp?.id].filter((id): id is string => Boolean(id)),
+    [currentComp?.id, previousComp?.id],
+  );
+  const { data: currentAndPreviousRegs = [] } = useQuery({
+    queryKey: ["dashboard-regs", currentAndPreviousIds],
+    queryFn: () => fetchRegistrosByCompetencias(currentAndPreviousIds),
+    enabled: currentAndPreviousIds.length > 0,
+  });
+  const { data: evolucaoRows = [] } = useQuery({
+    queryKey: ["dashboard-evolucao", comps.map((c) => c.id), paymentScope],
+    queryFn: () =>
+      paymentScope === "all"
+        ? Promise.resolve([] as EvolucaoRegistro[])
+        : fetchRegistrosByCompetencias<EvolucaoRegistro>(
+            comps.map((c) => c.id),
+            "competencia_id, valor_liquido, conta_financeiro",
+          ),
+    enabled: comps.length > 0,
+  });
+
   const registrosFiltrados = useMemo(
-    () => filterRegistrosByPaymentScope(allRegs as RegistroWithCompetencia[], paymentScope),
-    [allRegs, paymentScope],
+    () =>
+      filterRegistrosByPaymentScope(
+        currentAndPreviousRegs as RegistroWithCompetencia[],
+        paymentScope,
+      ),
+    [currentAndPreviousRegs, paymentScope],
   );
   const regCurrent = useMemo(
     () =>
@@ -91,11 +111,17 @@ function Dashboard() {
   );
 
   const kpis = useMemo(() => computeKpis(regCurrent, regPrev), [regCurrent, regPrev]);
-  const topPrestadores = useMemo(() => topBy(regCurrent, "prestador", "valor_liquido", 10), [regCurrent]);
-  const topMunicipios = useMemo(() => topBy(regCurrent, "municipio", "valor_liquido", 6), [regCurrent]);
+  const topPrestadores = useMemo(
+    () => topBy(regCurrent, "prestador", "valor_liquido", 10),
+    [regCurrent],
+  );
+  const topMunicipios = useMemo(
+    () => topBy(regCurrent, "municipio", "valor_liquido", 6),
+    [regCurrent],
+  );
   const evolucao = useMemo(
-    () => buildEvolucao(comps, registrosFiltrados),
-    [comps, registrosFiltrados],
+    () => buildEvolucao(comps, paymentScope === "all" ? null : evolucaoRows, paymentScope),
+    [comps, evolucaoRows, paymentScope],
   );
   const breakdown = useMemo(() => {
     const sum = (k: keyof Registro) => regCurrent.reduce((a, r) => a + Number(r[k] || 0), 0);
@@ -129,7 +155,10 @@ function Dashboard() {
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <Select value={paymentScope} onValueChange={(value) => setPaymentScope(value as PaymentScope)}>
+          <Select
+            value={paymentScope}
+            onValueChange={(value) => setPaymentScope(value as PaymentScope)}
+          >
             <SelectTrigger className="w-[180px]">
               <SelectValue />
             </SelectTrigger>
@@ -194,9 +223,19 @@ function Dashboard() {
               <LineChart data={evolucao}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                 <XAxis dataKey="label" stroke="var(--muted-foreground)" fontSize={12} />
-                <YAxis stroke="var(--muted-foreground)" fontSize={12} tickFormatter={(v) => `R$ ${(v / 1000).toFixed(0)}k`} />
+                <YAxis
+                  stroke="var(--muted-foreground)"
+                  fontSize={12}
+                  tickFormatter={(v) => `R$ ${(v / 1000).toFixed(0)}k`}
+                />
                 <Tooltip formatter={(v: number) => formatBRL(v)} />
-                <Line type="monotone" dataKey="total" stroke="var(--primary)" strokeWidth={3} dot={{ fill: "var(--gold)", r: 5 }} />
+                <Line
+                  type="monotone"
+                  dataKey="total"
+                  stroke="var(--primary)"
+                  strokeWidth={3}
+                  dot={{ fill: "var(--gold)", r: 5 }}
+                />
               </LineChart>
             </ResponsiveContainer>
           </CardContent>
@@ -211,7 +250,14 @@ function Dashboard() {
             {breakdown.length ? (
               <ResponsiveContainer width="100%" height={280}>
                 <PieChart>
-                  <Pie data={breakdown} dataKey="value" nameKey="name" innerRadius={50} outerRadius={90} paddingAngle={2}>
+                  <Pie
+                    data={breakdown}
+                    dataKey="value"
+                    nameKey="name"
+                    innerRadius={50}
+                    outerRadius={90}
+                    paddingAngle={2}
+                  >
                     {breakdown.map((_, i) => (
                       <Cell key={i} fill={COLORS[i % COLORS.length]} />
                     ))}
@@ -237,8 +283,19 @@ function Dashboard() {
             <ResponsiveContainer width="100%" height={360}>
               <BarChart data={topPrestadores} layout="vertical" margin={{ left: 40 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis type="number" stroke="var(--muted-foreground)" fontSize={11} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
-                <YAxis type="category" dataKey="name" width={150} stroke="var(--muted-foreground)" fontSize={10} />
+                <XAxis
+                  type="number"
+                  stroke="var(--muted-foreground)"
+                  fontSize={11}
+                  tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
+                />
+                <YAxis
+                  type="category"
+                  dataKey="name"
+                  width={150}
+                  stroke="var(--muted-foreground)"
+                  fontSize={10}
+                />
                 <Tooltip formatter={(v: number) => formatBRL(v)} />
                 <Bar dataKey="value" fill="var(--primary)" radius={[0, 4, 4, 0]} />
               </BarChart>
@@ -256,7 +313,11 @@ function Dashboard() {
               <BarChart data={topMunicipios}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                 <XAxis dataKey="name" stroke="var(--muted-foreground)" fontSize={11} />
-                <YAxis stroke="var(--muted-foreground)" fontSize={11} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
+                <YAxis
+                  stroke="var(--muted-foreground)"
+                  fontSize={11}
+                  tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
+                />
                 <Tooltip formatter={(v: number) => formatBRL(v)} />
                 <Bar dataKey="value" fill="var(--gold)" radius={[4, 4, 0, 0]} />
               </BarChart>
@@ -298,9 +359,7 @@ function KpiCard({
               <TrendingDown className="h-3 w-3 text-destructive" />
             )}
             <span
-              className={`text-xs font-medium ${
-                delta >= 0 ? "text-success" : "text-destructive"
-              }`}
+              className={`text-xs font-medium ${delta >= 0 ? "text-success" : "text-destructive"}`}
             >
               {delta >= 0 ? "+" : ""}
               {delta.toFixed(1)}%
@@ -377,19 +436,29 @@ function topBy(regs: Registro[], key: keyof Registro, valKey: keyof Registro, n:
     .slice(0, n);
 }
 
-function buildEvolucao(comps: Competencia[], registros: Registro[]) {
+function buildEvolucao(
+  comps: Competencia[],
+  registros: EvolucaoRegistro[] | null,
+  paymentScope: PaymentScope,
+) {
+  if (paymentScope === "all") {
+    return [...comps].reverse().map((c) => ({
+      label: `${monthName(c.mes)}/${String(c.ano).slice(2)}`,
+      total: Number(c.valor_total || 0),
+    }));
+  }
+
   const totalsByCompetencia = new Map<string, number>();
-  for (const registro of registros) {
+  const scopedRegistros = filterRegistrosByPaymentScope(registros ?? [], paymentScope);
+  for (const registro of scopedRegistros) {
     totalsByCompetencia.set(
       registro.competencia_id,
       (totalsByCompetencia.get(registro.competencia_id) ?? 0) + Number(registro.valor_liquido || 0),
     );
   }
 
-  return [...comps]
-    .reverse()
-    .map((c) => ({
-      label: `${monthName(c.mes)}/${String(c.ano).slice(2)}`,
-      total: totalsByCompetencia.get(c.id) ?? 0,
-    }));
+  return [...comps].reverse().map((c) => ({
+    label: `${monthName(c.mes)}/${String(c.ano).slice(2)}`,
+    total: totalsByCompetencia.get(c.id) ?? 0,
+  }));
 }

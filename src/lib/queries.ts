@@ -43,6 +43,8 @@ export interface Registro {
   lote: string | null;
 }
 
+const REGISTROS_PAGE_SIZE = 1000;
+
 export async function fetchCompetencias(): Promise<Competencia[]> {
   const { data, error } = await supabase
     .from("competencias")
@@ -53,12 +55,51 @@ export async function fetchCompetencias(): Promise<Competencia[]> {
   return (data ?? []) as Competencia[];
 }
 
+async function fetchPaginatedRegistros<T>(
+  selectClause: string,
+  filters?: {
+    competenciaId?: string | null;
+    competenciaIds?: string[];
+  },
+) {
+  const rows: T[] = [];
+
+  for (let from = 0; ; from += REGISTROS_PAGE_SIZE) {
+    let query = supabase
+      .from("registros")
+      .select(selectClause)
+      .range(from, from + REGISTROS_PAGE_SIZE - 1);
+
+    if (filters?.competenciaId) {
+      query = query.eq("competencia_id", filters.competenciaId);
+    }
+
+    if (filters?.competenciaIds?.length) {
+      query = query.in("competencia_id", filters.competenciaIds);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const batch = (data ?? []) as T[];
+    rows.push(...batch);
+
+    if (batch.length < REGISTROS_PAGE_SIZE) break;
+  }
+
+  return rows;
+}
+
 export async function fetchRegistros(competenciaId?: string | null): Promise<Registro[]> {
-  let q = supabase.from("registros").select("*").limit(5000);
-  if (competenciaId) q = q.eq("competencia_id", competenciaId);
-  const { data, error } = await q;
-  if (error) throw error;
-  return (data ?? []) as Registro[];
+  return fetchPaginatedRegistros<Registro>("*", { competenciaId });
+}
+
+export async function fetchRegistrosByCompetencias<T extends object = Registro>(
+  competenciaIds: string[],
+  selectClause = "*",
+): Promise<T[]> {
+  if (!competenciaIds.length) return [];
+  return fetchPaginatedRegistros<T>(selectClause, { competenciaIds });
 }
 
 export async function fetchAllRegistrosWithCompetencia() {
