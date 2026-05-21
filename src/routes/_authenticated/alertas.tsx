@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { fetchCompetencias, fetchAllRegistrosWithCompetencia } from "@/lib/queries";
 import { getPaymentScope, PAYMENT_SCOPE_OPTIONS, type PaymentScope } from "@/lib/payment-type";
+import { calculatePercentChange } from "@/lib/variation";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -25,7 +26,7 @@ interface Alerta {
   competenciaAnterior: string;
   valorAnterior: number;
   valorAtual: number;
-  variacaoPct: number;
+  variacaoPct: number | null;
   desc: string;
   ano: number;
   mes: number;
@@ -99,7 +100,7 @@ function AlertasPage() {
 
       for (const [key, value] of previousMap) {
         const currentValue = currentMap.get(key);
-        if (!currentValue || currentValue.total === 0) {
+        if (value.total > 0 && (!currentValue || currentValue.total === 0)) {
           list.push({
             tipo: "zero",
             prestador: value.nome,
@@ -113,8 +114,26 @@ function AlertasPage() {
             ano: current.ano,
             mes: current.mes,
           });
-        } else {
-          const delta = ((currentValue.total - value.total) / value.total) * 100;
+        } else if (currentValue && currentValue.total > 0) {
+          const delta = calculatePercentChange(currentValue.total, value.total);
+          if (delta === null) {
+            if (value.total === 0) {
+              list.push({
+                tipo: "nova",
+                prestador: currentValue.nome,
+                cnpj: key,
+                competencia: compLabel(current),
+                competenciaAnterior: compLabel(previous),
+                valorAnterior: 0,
+                valorAtual: currentValue.total,
+                variacaoPct: null,
+                desc: `Nova producao em ${compLabel(current)} sem base comparavel em ${compLabel(previous)} (${formatBRL(0)})`,
+                ano: current.ano,
+                mes: current.mes,
+              });
+            }
+            continue;
+          }
           if (delta < -30) {
             list.push({
               tipo: "queda",
@@ -157,7 +176,7 @@ function AlertasPage() {
             competenciaAnterior: compLabel(previous),
             valorAnterior: 0,
             valorAtual: currentValue.total,
-            variacaoPct: 100,
+            variacaoPct: null,
             desc: `Nova producao em ${compLabel(current)} - ${formatBRL(currentValue.total)}`,
             ano: current.ano,
             mes: current.mes,
@@ -169,7 +188,7 @@ function AlertasPage() {
     return list.sort((a, b) => {
       if (a.ano !== b.ano) return b.ano - a.ano;
       if (a.mes !== b.mes) return b.mes - a.mes;
-      return Math.abs(b.variacaoPct) - Math.abs(a.variacaoPct);
+      return Math.abs(b.variacaoPct ?? 0) - Math.abs(a.variacaoPct ?? 0);
     });
   }, [sortedComps, allRegs, effectiveFrom, effectiveTo, paymentScope]);
 
@@ -193,7 +212,7 @@ function AlertasPage() {
       CNPJ: alerta.cnpj,
       "Valor Anterior": Number(alerta.valorAnterior.toFixed(2)),
       "Valor Atual": Number(alerta.valorAtual.toFixed(2)),
-      "Variacao %": Number(alerta.variacaoPct.toFixed(2)),
+      "Variacao %": alerta.variacaoPct == null ? null : Number(alerta.variacaoPct.toFixed(2)),
       Descricao: alerta.desc,
     }));
     const ws = XLSX.utils.json_to_sheet(rows);

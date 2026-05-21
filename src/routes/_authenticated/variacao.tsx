@@ -12,10 +12,10 @@ import {
   CartesianGrid,
   Legend,
 } from "recharts";
-import { supabase } from "@/integrations/supabase/client";
-import { fetchCompetencias } from "@/lib/queries";
+import { fetchCompetencias, fetchRegistrosForVariacao, type VariacaoRegistro } from "@/lib/queries";
 import { formatBRL, monthName } from "@/lib/excel/parser";
 import { getPaymentScope, PAYMENT_SCOPE_OPTIONS, type PaymentScope } from "@/lib/payment-type";
+import { calculatePercentChange } from "@/lib/variation";
 import { normalizeText } from "@/lib/text-normalization";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -62,26 +62,6 @@ interface Row {
   varPct: number | null;
 }
 
-interface VariacaoRawRow {
-  prestador: string;
-  municipio: string | null;
-  uf: string | null;
-  valor_liquido: number | null;
-  conta_financeiro: string | null;
-  competencia: { mes: number; ano: number } | null;
-}
-
-async function fetchVariacaoData() {
-  const { data, error } = await supabase
-    .from("registros")
-    .select(
-      "prestador, municipio, uf, valor_liquido, conta_financeiro, competencia:competencias(mes, ano)",
-    )
-    .limit(50000);
-  if (error) throw error;
-  return (data ?? []) as VariacaoRawRow[];
-}
-
 function VariacaoPage() {
   const { data: comps = [] } = useQuery({
     queryKey: ["competencias"],
@@ -89,7 +69,7 @@ function VariacaoPage() {
   });
   const { data: raw = [], isLoading } = useQuery({
     queryKey: ["variacao-data"],
-    queryFn: fetchVariacaoData,
+    queryFn: fetchRegistrosForVariacao,
   });
 
   const [mode, setMode] = useState<PeriodMode>("all");
@@ -129,7 +109,7 @@ function VariacaoPage() {
     const monthSet = new Set(monthKeys);
     const map = new Map<string, Row>();
 
-    for (const r of raw) {
+    for (const r of raw as VariacaoRegistro[]) {
       if (paymentScope !== "all" && getPaymentScope(r.conta_financeiro) !== paymentScope) continue;
       const c = r.competencia;
       if (!c) continue;
@@ -162,10 +142,8 @@ function VariacaoPage() {
       const firstVal = row.porMes[firstKey] ?? 0;
       const lastVal = row.porMes[lastKey] ?? 0;
 
-      if (firstVal === 0 && lastVal === 0) row.varPct = 0;
-      else if (firstVal === 0 && lastVal > 0) row.varPct = 1;
-      else if (firstVal > 0 && lastVal === 0) row.varPct = -1;
-      else row.varPct = (lastVal - firstVal) / firstVal;
+      const pct = calculatePercentChange(lastVal, firstVal);
+      row.varPct = pct === null ? (lastVal === 0 ? 0 : null) : pct / 100;
     }
 
     return Array.from(map.values());
@@ -218,12 +196,13 @@ function VariacaoPage() {
     return totals;
   }, [filtered, monthKeys]);
 
-  const variacaoGlobal = useMemo(() => {
+  const variacaoGlobal = useMemo<number | null>(() => {
     if (monthKeys.length < 2) return 0;
     const first = totalsPorMes[monthKeys[0]] ?? 0;
     const last = totalsPorMes[monthKeys[monthKeys.length - 1]] ?? 0;
-    if (!first) return 0;
-    return (last - first) / first;
+    const pct = calculatePercentChange(last, first);
+    if (pct === null) return last === 0 ? 0 : null;
+    return pct / 100;
   }, [totalsPorMes, monthKeys]);
 
   const cresc = useMemo(
@@ -275,7 +254,7 @@ function VariacaoPage() {
       [row.municipio, row.uf].filter(Boolean).join("/"),
       ...monthKeys.map((key) => row.porMes[key] ?? 0),
       row.total,
-      row.varPct ?? 0,
+      row.varPct == null ? null : Number((row.varPct * 100).toFixed(2)),
     ]);
     const ws = XLSX.utils.aoa_to_sheet([header, ...body]);
     const wb = XLSX.utils.book_new();
@@ -463,7 +442,8 @@ function VariacaoPage() {
           <CardContent>
             <p className="text-2xl font-bold text-emerald-600">{cresc}</p>
             <p className="text-xs text-muted-foreground">
-              Variação global: {(variacaoGlobal * 100).toFixed(1)}%
+              Variação global:{" "}
+              {variacaoGlobal == null ? "—" : `${(variacaoGlobal * 100).toFixed(1)}%`}
             </p>
           </CardContent>
         </Card>

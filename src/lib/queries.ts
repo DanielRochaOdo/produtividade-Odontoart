@@ -103,10 +103,20 @@ export async function fetchRegistrosByCompetencias<T extends object = Registro>(
 }
 
 export async function fetchAllRegistrosWithCompetencia() {
-  const { data, error } = await supabase
-    .from("registros")
-    .select("*, competencia:competencias(mes, ano)")
-    .limit(20000);
-  if (error) throw error;
-  return data ?? [];
+  return fetchPaginatedRegistros("*, competencia:competencias(mes, ano)");
+}
+
+export interface VariacaoRegistro {
+  prestador: string;
+  municipio: string | null;
+  uf: string | null;
+  valor_liquido: number | null;
+  conta_financeiro: string | null;
+  competencia: { mes: number; ano: number } | null;
+}
+
+export async function fetchRegistrosForVariacao(): Promise<VariacaoRegistro[]> {
+  return fetchPaginatedRegistros<VariacaoRegistro>(
+    "prestador, municipio, uf, valor_liquido, conta_financeiro, competencia:competencias(mes, ano)",
+  );
 }
