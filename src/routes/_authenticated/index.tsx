@@ -12,6 +12,7 @@ import {
   filterRegistrosByPaymentScope,
   type PaymentScope,
 } from "@/lib/payment-type";
+import { calculatePercentChange } from "@/lib/variation";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Select,
@@ -412,15 +413,14 @@ function computeKpis(curr: Registro[], prev: Registro[]) {
   const ticket = qtd ? total / qtd : 0;
   const ticketPrev = qtdPrev ? totalPrev / qtdPrev : 0;
   const clinicas = new Set(curr.map((r) => r.cnpj || r.prestador)).size;
-  const pct = (a: number, b: number) => (b ? ((a - b) / b) * 100 : null);
   return {
     total,
     qtdProc: qtd,
     ticket,
     clinicas,
-    totalDelta: pct(total, totalPrev),
-    qtdDelta: pct(qtd, qtdPrev),
-    ticketDelta: pct(ticket, ticketPrev),
+    totalDelta: calculatePercentChange(total, totalPrev),
+    qtdDelta: calculatePercentChange(qtd, qtdPrev),
+    ticketDelta: calculatePercentChange(ticket, ticketPrev),
   };
 }
 
