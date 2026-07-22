@@ -1,0 +1,40 @@
+name: Supabase keepalive
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Supabase secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [[ -z "$SUPABASE_URL" || -z "$SUPABASE_ANON_KEY" ]]; then
+            echo "Configure SUPABASE_URL and SUPABASE_ANON_KEY in the repository secrets."
+            exit 1
+          fi
+
+      - name: Read Supabase REST endpoint
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          endpoint="${SUPABASE_URL%/}/rest/v1/catalog_links?select=id&limit=1"
+          status_code=$(curl --silent --show-error --location \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            --header "apikey: $SUPABASE_ANON_KEY" \
+            --header "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            "$endpoint")
+
+          if [[ ! "$status_code" =~ ^2[0-9][0-9]$ ]]; then
+            echo "Supabase keepalive failed with HTTP $status_code."
+            exit 1
+          fi
+
+          echo "Supabase keepalive succeeded with HTTP $status_code."
