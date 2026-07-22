@@ -21,6 +21,9 @@ dist-ssr
 .dev.vars
 .env
 
+# Keep the shareable template versioned.
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
